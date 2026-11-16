@@ -1,0 +1,53 @@
+name: SSC30KQ UVC preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      TARGET_SHA: 4cc6476cbf14e1ff11f5e6d27e501fc770d7ed64
+      BOARD: ssc30kq_ultimate
+    steps:
+      - name: Checkout exact firmware revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 1
+      - name: Prepare build environment
+        run: |
+          echo "BR2_DL_DIR=$GITHUB_WORKSPACE/output/dl" >> "$GITHUB_ENV"
+          mkdir -p output/dl
+      - name: Build stock firmware to reproduce kernel configuration
+        run: make BOARD="$BOARD"
+      - name: Collect kernel build evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p uvc-preflight
+          printf 'firmware_sha=%s\nboard=%s\n' "$TARGET_SHA" "$BOARD" > uvc-preflight/metadata.txt
+          find output -type f \( -name Module.symvers -o -name modules.builtin -o -name modules.order -o -name autoconf.h \) -print > uvc-preflight/paths.txt 2>/dev/null || true
+          find output -type f -name .config -print >> uvc-preflight/paths.txt 2>/dev/null || true
+          while IFS= read -r file; do
+            case "$file" in
+              *linux*|*kernel*)
+                dest="uvc-preflight/$(echo "$file" | tr / _)"
+                cp "$file" "$dest" 2>/dev/null || true
+                ;;
+            esac
+          done < uvc-preflight/paths.txt
+          find output -type f -name '*.ko' -print > uvc-preflight/modules.txt 2>/dev/null || true
+          grep -h -E '^(CONFIG_(MEDIA_SUPPORT|MEDIA_USB_SUPPORT|VIDEO_DEV|VIDEO_V4L2|USB_VIDEO_CLASS|VIDEOBUF2_|MODVERSIONS|MODULES)|# CONFIG_(MEDIA_SUPPORT|MEDIA_USB_SUPPORT|VIDEO_DEV|USB_VIDEO_CLASS) is not set)' uvc-preflight/*config* > uvc-preflight/video-options.txt 2>/dev/null || true
+          find uvc-preflight -maxdepth 1 -type f -printf '%f %s bytes\n'
+      - name: Upload diagnostics (no firmware flashing)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssc30kq-uvc-preflight
+          path: uvc-preflight/
+          if-no-files-found: error
