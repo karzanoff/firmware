@@ -26,8 +26,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p uvc-output
-          KDIR="$(find output/build -maxdepth 1 -type d -name 'linux-*' | head -n 1)"
-          test -n "$KDIR" && test -f "$KDIR/.config" && test -f "$KDIR/Module.symvers"
+          echo 'Candidate kernel directories:'
+          find output/build -maxdepth 2 -type f -name Makefile -path '*/linux-*/Makefile' -print || true
+          KDIR=""
+          while IFS= read -r dir; do
+            if [ -f "$dir/.config" ] && [ -f "$dir/Module.symvers" ] && [ -f "$dir/Makefile" ] && grep -q '^VERSION = 4$' "$dir/Makefile" && grep -q '^PATCHLEVEL = 9$' "$dir/Makefile"; then
+              KDIR="$dir"
+              break
+            fi
+          done < <(find output/build -maxdepth 1 -type d -name 'linux-*' | sort)
+          if [ -z "$KDIR" ]; then
+            echo 'ERROR: No configured Linux 4.9 kernel with Module.symvers found.'
+            find output/build -maxdepth 2 \( -name .config -o -name Module.symvers \) -print | head -80
+            exit 1
+          fi
           cp "$KDIR/.config" uvc-output/original-kernel.config
           cp "$KDIR/Module.symvers" uvc-output/original-Module.symvers
           echo "Kernel build: $KDIR"
