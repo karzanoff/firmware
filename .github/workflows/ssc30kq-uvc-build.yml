@@ -1,0 +1,70 @@
+name: SSC30KQ UVC modules (experimental)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      TARGET_SHA: 4cc6476cbf14e1ff11f5e6d27e501fc770d7ed64
+      BOARD: ssc30kq_ultimate
+    steps:
+      - name: Checkout matching OpenIPC revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 1
+      - name: Rebuild stock firmware toolchain and kernel
+        run: make BOARD="$BOARD"
+      - name: Build experimental media modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p uvc-output
+          KDIR="$(find output/build -maxdepth 1 -type d -name 'linux-*' | head -n 1)"
+          test -n "$KDIR" && test -f "$KDIR/.config" && test -f "$KDIR/Module.symvers"
+          cp "$KDIR/.config" uvc-output/original-kernel.config
+          cp "$KDIR/Module.symvers" uvc-output/original-Module.symvers
+          echo "Kernel build: $KDIR"
+          echo "Kernel Makefile version:"; grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)\s*=' "$KDIR/Makefile" | head -n 4
+          # Buildroot compiler is selected from the actual generated toolchain, not guessed.
+          GCC="$(find "$PWD/output/host/bin" -maxdepth 1 -type f -name '*-gcc' | grep -E 'arm.*gcc$' | head -n 1 || true)"
+          if [ -z "$GCC" ]; then
+            GCC="$(find "$PWD/output/host/bin" -maxdepth 1 -type l -name '*-gcc' | grep -E 'arm.*gcc$' | head -n 1 || true)"
+          fi
+          test -n "$GCC" || { echo 'Cannot locate ARM cross compiler'; exit 1; }
+          PREFIX="${GCC%gcc}"
+          echo "Cross compiler: $GCC"
+          export ARCH=arm CROSS_COMPILE="$PREFIX"
+          cd "$KDIR"
+          ./scripts/config --enable MEDIA_SUPPORT \
+            --enable MEDIA_CAMERA_SUPPORT \
+            --enable MEDIA_USB_SUPPORT \
+            --module VIDEO_DEV \
+            --enable VIDEO_V4L2 \
+            --module USB_VIDEO_CLASS \
+            --module VIDEOBUF2_CORE \
+            --module VIDEOBUF2_V4L2 \
+            --module VIDEOBUF2_MEMOPS \
+            --module VIDEOBUF2_VMALLOC
+          make olddefconfig
+          grep -E '^(CONFIG_(MEDIA_SUPPORT|MEDIA_CAMERA_SUPPORT|MEDIA_USB_SUPPORT|VIDEO_DEV|VIDEO_V4L2|USB_VIDEO_CLASS|VIDEOBUF2_))|^# CONFIG_(MEDIA_SUPPORT|VIDEO_DEV|USB_VIDEO_CLASS)' .config | tee "$GITHUB_WORKSPACE/uvc-output/resolved-video-options.txt"
+          grep -q '^CONFIG_USB_VIDEO_CLASS=m$' .config || { echo 'UVC is not selectable in this kernel config'; exit 1; }
+          make -j2 modules
+          find drivers/media -type f -name '*.ko' -print -exec cp --parents '{}' "$GITHUB_WORKSPACE/uvc-output/" \;
+          cp .config "$GITHUB_WORKSPACE/uvc-output/modified-kernel.config"
+          cp Module.symvers "$GITHUB_WORKSPACE/uvc-output/modified-Module.symvers"
+          printf 'original_sha=%s\nboard=%s\ncompiler=%s\n' "$TARGET_SHA" "$BOARD" "$GCC" > "$GITHUB_WORKSPACE/uvc-output/build-info.txt"
+          find "$GITHUB_WORKSPACE/uvc-output" -name '*.ko' | grep -q . || { echo 'No media modules were produced'; exit 1; }
+      - name: Upload modules and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssc30kq-uvc-modules-experimental
+          path: uvc-output/
+          if-no-files-found: warn
